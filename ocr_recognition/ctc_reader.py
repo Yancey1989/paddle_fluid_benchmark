@@ -20,7 +20,7 @@ TEST_DATA_DIR_NAME = "test_images"
 TRAIN_LIST_FILE_NAME = "train.list"
 TEST_LIST_FILE_NAME = "test.list"
 
-paddle.dataset.common.DATA_HOME="/paddle/workspaces/dataset"
+#paddle.dataset.common.DATA_HOME="/paddle/workspaces/dataset"
 
 
 class DataGenerator(object):
