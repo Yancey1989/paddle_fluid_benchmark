@@ -31,6 +31,11 @@ add_arg('parallel',          bool,  False,     "Whether use parallel training.")
 add_arg('local',             bool,  True,      "Local train or distributed.")
 # yapf: enable
 
+def print_train_time(start_time, end_time, num_samples):
+    train_elapsed = end_time - start_time
+    examples_per_sec = num_samples / train_elapsed
+    print('Total examples: %d, total time: %.5f, performance: %.5f examples/sed' %
+          (num_samples, train_elapsed, examples_per_sec))
 
 def train(args, data_reader=ctc_reader):
     """OCR CTC training"""
@@ -87,8 +92,8 @@ def train(args, data_reader=ctc_reader):
         for data in test_reader():
             exe.run(inference_program, feed=get_feeder_data(data, place))
         _, test_seq_error = error_evaluator.eval(exe)
-        print "\nTime: %s; Pass[%d]-batch[%d]; Test seq error: %s.\n" % (
-            time.time(), pass_id, batch_id, str(test_seq_error[0]))
+        print("Pass[%d]-batch[%d]; Test seq error: %s." % (
+              pass_id, batch_id, str(test_seq_error[0])))
 
     def save_model(args, exe, pass_id, batch_id):
         filename = "model_%05d_%d" % (pass_id, batch_id)
@@ -103,20 +108,23 @@ def train(args, data_reader=ctc_reader):
             total_loss = 0.0
             total_seq_error = 0.0
             # train a pass
+            num_samples, start_time = 0, time.time()
             for data in train_reader():
+                batch_start_time = time.time()
                 results = train_exe.run(var_names, feed=get_feeder_data(data, place))
                 results = [np.array(result).sum() for result in results]
                 total_loss += results[0]
                 total_seq_error += results[2]
                 # training log
                 if batch_id % args.log_period == 0:
-                    print "\nTime: %s; Pass[%d]-batch[%d]; Avg Warp-CTC loss: %s; Avg seq err: %s" % (
-                        time.time(), pass_id, batch_id,
-                        total_loss / (batch_id * args.batch_size),
-                        total_seq_error / (batch_id * args.batch_size))
-                    sys.stdout.flush()
+                    print("Pass[%d]-batch[%d]; Avg Warp-CTC loss: %s; Avg seq err: %s; Speed: %.5f samples/sec" % (
+                          pass_id, batch_id,
+                          total_loss / (batch_id * args.batch_size),
+                          total_seq_error / (batch_id * args.batch_size),
+                          len(data) / (time.time() - batch_start_time)))
 
                 # evaluate
+                
                 if batch_id % args.eval_period == 0:
                     if model_average:
                         with model_average.apply(exe):
@@ -125,15 +133,18 @@ def train(args, data_reader=ctc_reader):
                         test(pass_id, batch_id)
 
                 # save model
+                """
                 if batch_id % args.save_model_period == 0:
                     if model_average:
-                        with model_average.apply(exe):
+                        with model_average.apply(exe)
                             save_model(args, exe, pass_id, batch_id)
                     else:
                         save_model(args, exe, pass_id, batch_id)
-
+                """
                 batch_id += 1
                 train_exe.bcast_params()
+                num_samples += len(data)
+            print_train_time(start_time, time.time(), num_samples)
   
     if args.local:
         place = core.CPUPlace() if args.use_gpu else core.CUDAPlace(0)
