@@ -8,6 +8,7 @@ import sys
 import time
 import os
 import numpy as np
+import paddle
 import paddle.fluid as fluid
 import paddle.fluid.core as core
 import paddle.fluid.transpiler.distribute_transpiler as distribute_transpiler
@@ -27,7 +28,7 @@ add_arg('use_gpu',           bool,  True,      "Whether use GPU to train.")
 add_arg('min_average_window',int,   10000,     "Min average window.")
 add_arg('max_average_window',int,   15625,     "Max average window. It is proposed to be set as the number of minibatch in a pass.")
 add_arg('average_window',    float, 0.15,      "Average window.")
-add_arg('parallel',          bool,  False,     "Whether use parallel training.")
+add_arg('parallel',          bool,  True,     "Whether use parallel training.")
 add_arg('local',             bool,  True,      "Local train or distributed.")
 # yapf: enable
 
@@ -60,7 +61,9 @@ def train(args, data_reader=ctc_reader):
         train_images_dir=train_images,
         train_list_file=train_list)
     test_reader = data_reader.test(
-        test_images_dir=test_images, test_list_file=test_list)
+        args.batch_size,
+        test_images_dir=test_images,
+        test_list_file=test_list)
 
     # prepare environment
     place = fluid.CPUPlace()
@@ -79,21 +82,21 @@ def train(args, data_reader=ctc_reader):
         fluid.io.load_params(exe, dirname=model_dir, filename=model_file_name)
         print "Init model from: %s." % args.init_model
 
-    train_exe = exe
-    error_evaluator.reset(exe)
-    if args.parallel:
-        train_exe = fluid.ParallelExecutor(
-            use_cuda=True, loss_name=sum_cost.name)
 
-    fetch_vars = [sum_cost] + error_evaluator.metrics
+    fetch_vars = [sum_cost]
+    fetch_vars.extend([e for e in error_evaluator])
 
-    def test(pass_id, batch_id):
-        error_evaluator.reset(exe)
-        for data in test_reader():
-            exe.run(inference_program, feed=get_feeder_data(data, place))
-        _, test_seq_error = error_evaluator.eval(exe)
-        print("Pass[%d]-batch[%d]; Test seq error: %s." % (
-              pass_id, batch_id, str(test_seq_error[0])))
+    def test_parallel(exe, pass_id, batch_id):
+        distance_evaluator = fluid.metrics.EditDistance(None)
+        test_fetch = [v.name for v in error_evaluator]
+
+        distance_evaluator.reset()
+        for _, data in enumerate(test_reader()):
+            print(data)
+            test_ret = exe.run(test_fetch, feed=get_feeder_data(data, place))
+            print("test distance sum: ", np.sum(test_ret[0]), test_ret[0])
+            distance_evaluator.update(distances=np.array(test_ret[0]), seq_num=np.sum(test_ret[1]))
+        return distance_evaluator.eval()
 
     def save_model(args, exe, pass_id, batch_id):
         filename = "model_%05d_%d" % (pass_id, batch_id)
@@ -103,6 +106,9 @@ def train(args, data_reader=ctc_reader):
 
     def train_parallel(train_exe):
         var_names = [var.name for var in fetch_vars]
+        test_exe = fluid.ParallelExecutor(
+            use_cuda=True, main_program=inference_program, share_vars_from=train_exe)
+
         for pass_id in range(args.pass_num):
             batch_id = 1
             total_loss = 0.0
@@ -114,7 +120,7 @@ def train(args, data_reader=ctc_reader):
                 results = train_exe.run(var_names, feed=get_feeder_data(data, place))
                 results = [np.array(result).sum() for result in results]
                 total_loss += results[0]
-                total_seq_error += results[2]
+                total_seq_error += results[1]
                 # training log
                 if batch_id % args.log_period == 0:
                     print("Pass[%d]-batch[%d]; Avg Warp-CTC loss: %s; Avg seq err: %s; Speed: %.5f samples/sec" % (
@@ -124,13 +130,14 @@ def train(args, data_reader=ctc_reader):
                           len(data) / (time.time() - batch_start_time)))
 
                 # evaluate
-                
                 if batch_id % args.eval_period == 0:
                     if model_average:
                         with model_average.apply(exe):
-                            test(pass_id, batch_id)
+                            test_ret = test_parallel(test_exe, pass_id, batch_id)
                     else:
-                        test(pass_id, batch_id)
+                        test_ret = test_parallel(test_exe, pass_id, batch_id)
+                    print("Pass[%d]-batch[%d]; Test avg seq error: %s\n" %
+                        (pass_id, batch_id, test_ret[0]))
 
                 # save model
                 """
@@ -142,7 +149,6 @@ def train(args, data_reader=ctc_reader):
                         save_model(args, exe, pass_id, batch_id)
                 """
                 batch_id += 1
-                train_exe.bcast_params()
                 num_samples += len(data)
             print_train_time(start_time, time.time(), num_samples)
   
@@ -172,7 +178,7 @@ def train(args, data_reader=ctc_reader):
             trainer_id,
             pservers=pserver_endpoints,
             trainers=trainers)
-        place = core.CPUPlace() if args.use_gpu else core.CUDAPlace(0)
+        place = core.CUDAPlace(0) if args.use_gpu else core.CPUPlace()
         if training_role == "PSERVER":
             pserver_program = t.get_pserver_program(current_endpoint)
             pserver_startup_program = t.get_startup_program(current_endpoint,
