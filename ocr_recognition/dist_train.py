@@ -92,9 +92,7 @@ def train(args, data_reader=ctc_reader):
 
         distance_evaluator.reset()
         for _, data in enumerate(test_reader()):
-            print(data)
             test_ret = exe.run(test_fetch, feed=get_feeder_data(data, place))
-            print("test distance sum: ", np.sum(test_ret[0]), test_ret[0])
             distance_evaluator.update(distances=np.array(test_ret[0]), seq_num=np.sum(test_ret[1]))
         return distance_evaluator.eval()
 
