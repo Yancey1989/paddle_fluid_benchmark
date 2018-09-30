@@ -95,8 +95,6 @@ def train(args, data_reader=ctc_reader):
         for idx, data in enumerate(test_reader()):
             test_ret = exe.run(test_fetch, feed=get_feeder_data(data, place))
             distance_evaluator.update(distances=test_ret[0], seq_num=np.mean(test_ret[1]))
-            if (idx + 1) % 10 == 0:
-                print("Test Pass:[%d]-Batch:[%d], test ret: %s"%(pass_id, idx, test_ret))
         return distance_evaluator.eval()
 
     def test(exe, pass_id):
@@ -107,7 +105,6 @@ def train(args, data_reader=ctc_reader):
         for idx, data in enumerate(test_reader()):
             test_ret = exe.run(inference_program, feed=get_feeder_data(data, place), fetch_list=test_fetch)
             distance_evaluator.update(distances=test_ret[0], seq_num=np.mean(test_ret[1]))
-            print("Test Pass:[%d]-Batch:[%d], test ret: %s"%(pass_id, idx, test_ret))
         return distance_evaluator.eval()
 
     def train_parallel(train_exe):
