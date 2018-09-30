@@ -86,26 +86,37 @@ def train(args, data_reader=ctc_reader):
     fetch_vars = [sum_cost]
     fetch_vars.extend([e for e in error_evaluator])
 
+
     def test_parallel(exe, pass_id, batch_id):
         distance_evaluator = fluid.metrics.EditDistance(None)
         test_fetch = [v.name for v in error_evaluator]
 
         distance_evaluator.reset()
-        for _, data in enumerate(test_reader()):
+        for idx, data in enumerate(test_reader()):
             test_ret = exe.run(test_fetch, feed=get_feeder_data(data, place))
-            distance_evaluator.update(distances=np.array(test_ret[0]), seq_num=np.sum(test_ret[1]))
+            distance_evaluator.update(distances=test_ret[0], seq_num=np.mean(test_ret[1]))
+            if (idx + 1) % 10 == 0:
+                print("Test Pass:[%d]-Batch:[%d], test ret: %s"%(pass_id, idx, test_ret))
         return distance_evaluator.eval()
 
-    def save_model(args, exe, pass_id, batch_id):
-        filename = "model_%05d_%d" % (pass_id, batch_id)
-        fluid.io.save_params(
-            exe, dirname=args.save_model_dir, filename=filename)
-        print "Saved model to: %s/%s." % (args.save_model_dir, filename)
+    def test(exe, pass_id):
+        distance_evaluator = fluid.metrics.EditDistance(None)
+        test_fetch = [v.name for v in error_evaluator]
+
+        distance_evaluator.reset()
+        for idx, data in enumerate(test_reader()):
+            test_ret = exe.run(inference_program, feed=get_feeder_data(data, place), fetch_list=test_fetch)
+            distance_evaluator.update(distances=test_ret[0], seq_num=np.mean(test_ret[1]))
+            print("Test Pass:[%d]-Batch:[%d], test ret: %s"%(pass_id, idx, test_ret))
+        return distance_evaluator.eval()
 
     def train_parallel(train_exe):
         var_names = [var.name for var in fetch_vars]
-        test_exe = fluid.ParallelExecutor(
-            use_cuda=True, main_program=inference_program, share_vars_from=train_exe)
+        #test_exe = fluid.ParallelExecutor(
+        #    use_cuda=True, main_program=inference_program, share_vars_from=train_exe)
+        place = fluid.CUDAPlace(0) if args.use_gpu else fluid.CPUPlace()
+        test_exe = fluid.Executor(place)
+
 
         for pass_id in range(args.pass_num):
             batch_id = 1
@@ -113,7 +124,7 @@ def train(args, data_reader=ctc_reader):
             total_seq_error = 0.0
             # train a pass
             num_samples, start_time = 0, time.time()
-            for data in train_reader():
+            for idx, data in enumerate(train_reader()):
                 batch_start_time = time.time()
                 results = train_exe.run(var_names, feed=get_feeder_data(data, place))
                 results = [np.array(result).sum() for result in results]
@@ -126,30 +137,21 @@ def train(args, data_reader=ctc_reader):
                           total_loss / (batch_id * args.batch_size),
                           total_seq_error / (batch_id * args.batch_size),
                           len(data) / (time.time() - batch_start_time)))
-
-                # evaluate
-                if batch_id % args.eval_period == 0:
-                    if model_average:
-                        with model_average.apply(exe):
-                            test_ret = test_parallel(test_exe, pass_id, batch_id)
-                    else:
-                        test_ret = test_parallel(test_exe, pass_id, batch_id)
-                    print("Pass[%d]-batch[%d]; Test avg seq error: %s\n" %
-                        (pass_id, batch_id, test_ret[0]))
-
-                # save model
-                """
-                if batch_id % args.save_model_period == 0:
-                    if model_average:
-                        with model_average.apply(exe)
-                            save_model(args, exe, pass_id, batch_id)
-                    else:
-                        save_model(args, exe, pass_id, batch_id)
-                """
                 batch_id += 1
                 num_samples += len(data)
+
             print_train_time(start_time, time.time(), num_samples)
-  
+            # run test
+            if model_average:
+                with model_average.apply(test_exe):
+                    #test_ret = test_parallel(test_exe, pass_id, batch_id)
+                    test_ret = test(test_exe, pass_id)
+            else:
+                #test_ret = test_parallel(test_exe, pass_id, batch_id)
+                test_ret = test(test_exe, pass_id)
+            print("Pass[%d]; Test avg seq error: %s\n" %
+                (pass_id, test_ret[1]))
+
     if args.local:
         place = core.CPUPlace() if args.use_gpu else core.CUDAPlace(0)
         startup_exe = fluid.Executor(place)
@@ -181,22 +183,19 @@ def train(args, data_reader=ctc_reader):
             pserver_program = t.get_pserver_program(current_endpoint)
             pserver_startup_program = t.get_startup_program(current_endpoint,
                                                         pserver_program)
-            exe = fluid.Executor(place)
+            exe = fluid.Executor(core.CPUPlace())
             exe.run(pserver_startup_program)
             exe.run(pserver_program)
         elif training_role == "TRAINER":
-            startup_exe = fluid.Executor(place)
-            startup_exe.run(fluid.default_startup_program())
+            exe.run(fluid.default_startup_program())
             trainer_program = t.get_trainer_program()
             exec_strategy = ExecutionStrategy()
             exec_strategy.use_cuda = args.use_gpu
+            exec_strategy.num_threads = 1
             train_exe = fluid.ParallelExecutor(use_cuda=args.use_gpu, main_program=trainer_program, loss_name=sum_cost.name, exec_strategy=exec_strategy)
             train_parallel(train_exe)
         else:
             raise ValueError("env PADDLE_TRAINING_ROLE should be in [PSERVER, TRIANER]")
-        
-
-
 
 def main():
     args = parser.parse_args()
